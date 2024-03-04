@@ -1,13 +1,20 @@
+use omnipaxos::OmniPaxos;
 use super::*;
+
+use omnipaxos_storage::memory_storage::MemoryStorage;
+use crate::node::KVCommand;
+
 
 /// OmniPaxosDurability is a OmniPaxos node that should provide the replicated
 /// implementation of the DurabilityLayer trait required by the Datastore.
 pub struct OmniPaxosDurability {
     // TODO
+    pub omni_paxos: OmniPaxos<KVCommand, MemoryStorage<KVCommand>>
 }
 
 impl DurabilityLayer for OmniPaxosDurability {
     fn iter(&self) -> Box<dyn Iterator<Item = (TxOffset, TxData)>> {
+        let it = self.omni_paxos.read_entries(..).iter();
         todo!()
     }
 

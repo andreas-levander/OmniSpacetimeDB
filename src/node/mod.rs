@@ -1,5 +1,5 @@
 use crate::datastore::error::DatastoreError;
-use crate::datastore::example_datastore::ExampleDatastore;
+use crate::datastore::example_datastore::{ExampleDatastore, Tx};
 use crate::datastore::tx_data::TxResult;
 use crate::datastore::*;
 use crate::durability::omnipaxos_durability::OmniPaxosDurability;
@@ -8,31 +8,102 @@ use omnipaxos::messages::*;
 use omnipaxos::util::NodeId;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use omnipaxos::macros::Entry;
+use omnipaxos::messages::sequence_paxos::PaxosMessage;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::Receiver;
+use tokio::time;
+use tokio::time::{Duration};
+use tokio::sync::{Mutex as AsyncMutex};
+
+#[derive(Clone, Debug)]
+pub struct KeyValue {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Entry)]
+pub enum KVCommand {
+    Put(KeyValue),
+    Delete(String),
+    Get(String),
+}
+
 
 pub struct NodeRunner {
     pub node: Arc<Mutex<Node>>,
+    senders: Arc<HashMap<NodeId, mpsc::Sender<Message<KVCommand>>>>,
+    receivers: Arc<HashMap<NodeId, AsyncMutex<mpsc::Receiver<Message<KVCommand>>>>>,
+    node_id : NodeId
     // TODO Messaging and running
 }
 
 impl NodeRunner {
     async fn send_outgoing_msgs(&mut self) {
-        todo!()
+        let msgs = self.node.lock().unwrap().omni_durability.omni_paxos.outgoing_messages();
+        for msg in msgs {
+            println!("Send message {:?}", msg);
+            let recipient = msg.get_receiver();
+            let channel = self.senders.get(&recipient).unwrap();
+            channel.clone().send(msg).await.expect("Failed to send message to channel");
+        }
+    }
+
+    async fn process_incoming_msgs(&mut self) {
+        let mut rx = self.receivers.get(&self.node_id).unwrap().lock().await;
+        while let Some(message) = rx.recv().await {
+            println!("GOT = {:?}", message);
+        }
+    }
+
+    async fn handle_decided_entries(&mut self) {
+        let mut n = self.node.lock().unwrap();
+        if n.omni_durability.get_durable_tx_offset() > n.last_decided_index {
+            let _ = n.advance_replicated_durability_offset();
+            n.last_decided_index = n.omni_durability.get_durable_tx_offset();
+        }
     }
 
     pub async fn run(&mut self) {
-        todo!()
+        println!("Running node: {}", self.node_id);
+        // setting up functions to run every interval
+        let mut msg_interval = time::interval(Duration::from_millis(1));
+        let mut tick_interval = time::interval(Duration::from_millis(10));
+        loop {
+            tokio::select! {
+                biased;
+                _ = msg_interval.tick() => {
+                    self.process_incoming_msgs().await;
+                    self.send_outgoing_msgs().await;
+                    self.handle_decided_entries().await;
+                },
+                _ = tick_interval.tick() => {
+                    self.node.lock().unwrap().omni_durability.omni_paxos.tick();
+                },
+                else => (),
+            }
+        }
     }
 }
 
 pub struct Node {
     node_id: NodeId, // Unique identifier for the node
+    omni_durability: OmniPaxosDurability,
+    datastore: ExampleDatastore,
+    last_decided_index: TxOffset
                      // TODO Datastore and OmniPaxosDurability
+
 }
 
 impl Node {
     pub fn new(node_id: NodeId, omni_durability: OmniPaxosDurability) -> Self {
-        todo!()
+        Node {
+            node_id,
+            omni_durability,
+            datastore: ExampleDatastore::new(),
+            last_decided_index: TxOffset(0)
+        }
+
     }
 
     /// update who is the current leader. If a follower becomes the leader,
@@ -50,14 +121,13 @@ impl Node {
         todo!()
     }
 
-    pub fn begin_tx(
-        &self,
-        durability_level: DurabilityLevel,
-    ) -> <ExampleDatastore as Datastore<String, String>>::Tx {
+    pub fn begin_tx(&self, durability_level: DurabilityLevel, ) -> <ExampleDatastore as Datastore<String, String>>::Tx {
+        let tx = self.datastore.begin_tx(durability_level);
         todo!()
     }
 
     pub fn release_tx(&self, tx: <ExampleDatastore as Datastore<String, String>>::Tx) {
+        self.datastore.release_tx(tx);
         todo!()
     }
 
@@ -76,10 +146,8 @@ impl Node {
         todo!()
     }
 
-    fn advance_replicated_durability_offset(
-        &self,
-    ) -> Result<(), crate::datastore::error::DatastoreError> {
-        todo!()
+    fn advance_replicated_durability_offset(&self, ) -> Result<(), crate::datastore::error::DatastoreError> {
+        self.datastore.advance_replicated_durability_offset(self.omni_durability.get_durable_tx_offset())
     }
 }
 
@@ -97,7 +165,11 @@ mod tests {
     use omnipaxos::messages::Message;
     use omnipaxos::util::NodeId;
     use std::collections::HashMap;
+    use std::ops::Deref;
     use std::sync::{Arc, Mutex};
+    use std::thread::sleep;
+    use omnipaxos::{ClusterConfig, OmniPaxosConfig, ServerConfig};
+    use omnipaxos_storage::memory_storage::MemoryStorage;
     use tokio::runtime::{Builder, Runtime};
     use tokio::sync::mpsc;
     use tokio::task::JoinHandle;
@@ -106,10 +178,17 @@ mod tests {
 
     #[allow(clippy::type_complexity)]
     fn initialise_channels() -> (
-        HashMap<NodeId, mpsc::Sender<Message<_>>>,
-        HashMap<NodeId, mpsc::Receiver<Message<_>>>,
+        HashMap<NodeId, mpsc::Sender<Message<KVCommand>>>,
+        HashMap<NodeId, AsyncMutex<mpsc::Receiver<Message<KVCommand>>>>,
     ) {
-        todo!()
+        let mut senders: HashMap<NodeId, mpsc::Sender<Message<KVCommand>>> = HashMap::new();
+        let mut receivers: HashMap<NodeId, AsyncMutex<mpsc::Receiver<Message<KVCommand>>>> = HashMap::new();
+        for s in SERVERS {
+            let (tx, mut rx) = mpsc::channel::<Message<KVCommand>>(10);
+            senders.insert(s, tx);
+            receivers.insert(s, AsyncMutex::new(rx));
+        }
+        (senders, receivers)
     }
 
     fn create_runtime() -> Runtime {
@@ -120,12 +199,61 @@ mod tests {
             .unwrap()
     }
 
-    fn spawn_nodes(runtime: &mut Runtime) -> HashMap<NodeId, (Arc<Mutex<Node>>, JoinHandle<()>)> {
+    fn spawn_nodes() -> HashMap<NodeId, (Arc<Mutex<Node>>, JoinHandle<()>)> {
         let mut nodes = HashMap::new();
         let (sender_channels, mut receiver_channels) = initialise_channels();
+        let senders = Arc::new(sender_channels);
+        let receivers = Arc::new(receiver_channels);
         for pid in SERVERS {
-            todo!("spawn the nodes")
+
+            let server_config = ServerConfig {
+                pid,
+                election_tick_timeout: 5,
+                ..Default::default()
+            };
+            let cluster_config = ClusterConfig {
+                configuration_id: 1,
+                nodes: Vec::from(SERVERS),
+                ..Default::default()
+            };
+            let op_config = OmniPaxosConfig {
+                server_config,
+                cluster_config,
+            };
+            let omni_paxos = op_config
+                .build(MemoryStorage::default())
+                .expect("failed to build OmniPaxos");
+
+            let node = Arc::new(Mutex::new(Node::new(
+                pid,
+                OmniPaxosDurability{omni_paxos},
+            )));
+
+            let mut runner = NodeRunner{
+                node: node.clone(),
+                senders: senders.clone(),
+                receivers: receivers.clone(),
+                node_id: pid,
+            };
+
+            let handle = tokio::spawn(async move {
+                runner.run().await;
+
+            });
+            nodes.insert(pid, (node, handle));
         }
         nodes
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn basic_test() {
+        let nodes = spawn_nodes();
+        println!("test: basic test running");
+        for (key, value) in &nodes {
+            println!("{}:", key);
+        }
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(nodes.len(), 3);
     }
 }
