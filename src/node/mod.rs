@@ -33,14 +33,14 @@ pub enum KVCommand {
 
 pub struct NodeRunner {
     pub node: Arc<Mutex<Node>>,
-    senders: Arc<HashMap<NodeId, mpsc::Sender<Message<Transaction>>>>,
-    receivers: Arc<HashMap<NodeId, AsyncMutex<mpsc::Receiver<Message<Transaction>>>>>,
-    node_id : NodeId
-    // TODO Messaging and running
+    pub senders: Arc<HashMap<NodeId, mpsc::Sender<Message<Transaction>>>>,
+    pub receivers: Arc<HashMap<NodeId, AsyncMutex<mpsc::Receiver<Message<Transaction>>>>>,
+    pub node_id : NodeId
 }
 
 impl NodeRunner {
     async fn send_outgoing_msgs(&mut self) {
+        //println!("{} sending outgoing messages", self.node_id);
         let msgs = self.node.lock().unwrap().omni_durability.omni_paxos.outgoing_messages();
         for msg in msgs {
             println!("Send message {:?}", msg);
@@ -51,13 +51,18 @@ impl NodeRunner {
     }
 
     async fn process_incoming_msgs(&mut self) {
+        //println!("{} processing incomming messages", self.node_id);
         let mut rx = self.receivers.get(&self.node_id).unwrap().lock().await;
-        while let Some(message) = rx.recv().await {
-            println!("GOT = {:?}", message);
+
+        while let Ok(message) = rx.try_recv() {
+            println!("Id: {} GOT = {:?}", self.node_id, message);
+            self.node.lock().unwrap().omni_durability.omni_paxos.handle_incoming(message);
         }
+
     }
 
     async fn handle_decided_entries(&mut self) {
+        println!("{} handling decided entries", self.node_id);
         let mut n = self.node.lock().unwrap();
         if n.omni_durability.get_durable_tx_offset() > n.last_decided_index {
             let _ = n.advance_replicated_durability_offset();
@@ -74,11 +79,13 @@ impl NodeRunner {
             tokio::select! {
                 biased;
                 _ = msg_interval.tick() => {
+                    println!("Checking messages tick");
                     self.process_incoming_msgs().await;
                     self.send_outgoing_msgs().await;
-                    self.handle_decided_entries().await;
+                    //self.handle_decided_entries().await;
                 },
                 _ = tick_interval.tick() => {
+                    println!("omnipaxos tick");
                     self.node.lock().unwrap().omni_durability.omni_paxos.tick();
                 },
                 else => (),
@@ -92,8 +99,6 @@ pub struct Node {
     omni_durability: OmniPaxosDurability,
     datastore: ExampleDatastore,
     last_decided_index: TxOffset
-                     // TODO Datastore and OmniPaxosDurability
-
 }
 
 impl Node {
@@ -144,6 +149,7 @@ impl Node {
         &mut self,
         tx: <ExampleDatastore as Datastore<String, String>>::MutTx,
     ) -> Result<TxResult, DatastoreError> {
+        let result = self.datastore.commit_mut_tx(tx).expect("Datastore error");
         todo!()
     }
 
@@ -254,7 +260,7 @@ mod tests {
             println!("{}:", key);
         }
 
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
         assert_eq!(nodes.len(), 3);
     }
 }
