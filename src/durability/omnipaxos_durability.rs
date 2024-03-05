@@ -20,8 +20,8 @@ pub struct OmniPaxosDurability {
 
 impl DurabilityLayer for OmniPaxosDurability {
     fn iter(&self) -> Box<dyn Iterator<Item = (TxOffset, TxData)>> {
-        let it = self.omni_paxos.read_entries(..).iter();
-        todo!()
+        let mut it = self.omni_paxos.read_entries(..).unwrap().iter();
+        it
     }
 
     fn iter_starting_from_offset(
@@ -32,10 +32,14 @@ impl DurabilityLayer for OmniPaxosDurability {
     }
 
     fn append_tx(&mut self, tx_offset: TxOffset, tx_data: TxData) {
-        todo!()
+        self.omni_paxos.append(
+            Transaction{
+                offset: tx_offset,
+                data: tx_data
+            }).expect("Failed to append transaction in omnipaxos");
     }
 
     fn get_durable_tx_offset(&self) -> TxOffset {
-        todo!()
+        TxOffset(self.omni_paxos.get_decided_idx())
     }
 }

@@ -128,20 +128,18 @@ impl Node {
     }
 
     pub fn begin_tx(&self, durability_level: DurabilityLevel, ) -> <ExampleDatastore as Datastore<String, String>>::Tx {
-        let tx = self.datastore.begin_tx(durability_level);
-        todo!()
+        self.datastore.begin_tx(durability_level)
     }
 
     pub fn release_tx(&self, tx: <ExampleDatastore as Datastore<String, String>>::Tx) {
         self.datastore.release_tx(tx);
-        todo!()
     }
 
     /// Begins a mutable transaction. Only the leader is allowed to do so.
     pub fn begin_mut_tx(
         &self,
     ) -> Result<<ExampleDatastore as Datastore<String, String>>::MutTx, DatastoreError> {
-        todo!()
+        Ok(self.datastore.begin_mut_tx())
     }
 
     /// Commits a mutable transaction. Only the leader is allowed to do so.
