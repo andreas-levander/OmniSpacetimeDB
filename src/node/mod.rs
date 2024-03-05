@@ -4,6 +4,7 @@ use crate::datastore::tx_data::TxResult;
 use crate::datastore::*;
 use crate::durability::omnipaxos_durability::OmniPaxosDurability;
 use crate::durability::{DurabilityLayer, DurabilityLevel};
+use crate::durability::omnipaxos_durability::Transaction;
 use omnipaxos::messages::*;
 use omnipaxos::util::NodeId;
 use std::collections::HashMap;
@@ -32,8 +33,8 @@ pub enum KVCommand {
 
 pub struct NodeRunner {
     pub node: Arc<Mutex<Node>>,
-    senders: Arc<HashMap<NodeId, mpsc::Sender<Message<KVCommand>>>>,
-    receivers: Arc<HashMap<NodeId, AsyncMutex<mpsc::Receiver<Message<KVCommand>>>>>,
+    senders: Arc<HashMap<NodeId, mpsc::Sender<Message<Transaction>>>>,
+    receivers: Arc<HashMap<NodeId, AsyncMutex<mpsc::Receiver<Message<Transaction>>>>>,
     node_id : NodeId
     // TODO Messaging and running
 }
@@ -178,13 +179,13 @@ mod tests {
 
     #[allow(clippy::type_complexity)]
     fn initialise_channels() -> (
-        HashMap<NodeId, mpsc::Sender<Message<KVCommand>>>,
-        HashMap<NodeId, AsyncMutex<mpsc::Receiver<Message<KVCommand>>>>,
+        HashMap<NodeId, mpsc::Sender<Message<Transaction>>>,
+        HashMap<NodeId, AsyncMutex<mpsc::Receiver<Message<Transaction>>>>,
     ) {
-        let mut senders: HashMap<NodeId, mpsc::Sender<Message<KVCommand>>> = HashMap::new();
-        let mut receivers: HashMap<NodeId, AsyncMutex<mpsc::Receiver<Message<KVCommand>>>> = HashMap::new();
+        let mut senders: HashMap<NodeId, mpsc::Sender<Message<Transaction>>> = HashMap::new();
+        let mut receivers: HashMap<NodeId, AsyncMutex<mpsc::Receiver<Message<Transaction>>>> = HashMap::new();
         for s in SERVERS {
-            let (tx, mut rx) = mpsc::channel::<Message<KVCommand>>(10);
+            let (tx, mut rx) = mpsc::channel::<Message<Transaction>>(10);
             senders.insert(s, tx);
             receivers.insert(s, AsyncMutex::new(rx));
         }

@@ -1,15 +1,21 @@
+use omnipaxos::macros::Entry;
 use omnipaxos::OmniPaxos;
 use super::*;
 
 use omnipaxos_storage::memory_storage::MemoryStorage;
-use crate::node::KVCommand;
 
 
+/// Every transaction in the omnipaxos sequencepaxos log, aka all mutable transactions (TxResult from datastore)
+#[derive(Debug, Clone, Entry)]
+pub struct Transaction {
+    pub offset: TxOffset,
+    pub data: TxData
+}
 /// OmniPaxosDurability is a OmniPaxos node that should provide the replicated
 /// implementation of the DurabilityLayer trait required by the Datastore.
 pub struct OmniPaxosDurability {
     // TODO
-    pub omni_paxos: OmniPaxos<KVCommand, MemoryStorage<KVCommand>>
+    pub omni_paxos: OmniPaxos<Transaction, MemoryStorage<Transaction>>
 }
 
 impl DurabilityLayer for OmniPaxosDurability {
