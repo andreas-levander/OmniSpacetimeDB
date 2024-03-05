@@ -136,6 +136,7 @@ impl Node {
     pub fn update_leader(&mut self, new_leader: NodeId) {
         match self.leader {
             Some(current_leader) => {
+
                 // if there is a new leader
                 if (current_leader != new_leader) {
                     // if we were the leader
@@ -149,7 +150,8 @@ impl Node {
 
                     }
                     // we are a follower changing leader
-                    self.leader = Some(new_leader)
+                    self.leader = Some(new_leader);
+                    println!("{} swapping leader to: {}", self.node_id, new_leader);
 
                 }
             }
@@ -163,9 +165,9 @@ impl Node {
     fn apply_replicated_txns(&mut self) {
         let mut to_apply = self.omni_durability.iter_starting_from_offset(self.last_decided_index);
         while let Some(transaction) = to_apply.next() {
-            self.datastore.replay_transaction(&transaction.1)
+            self.datastore.replay_transaction(&transaction.1).expect("Failed to replay transaction")
 
-        }
+        };
     }
 
     pub fn begin_tx(&self, durability_level: DurabilityLevel, ) -> <ExampleDatastore as Datastore<String, String>>::Tx {

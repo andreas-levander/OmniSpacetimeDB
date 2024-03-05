@@ -21,29 +21,32 @@ pub struct OmniPaxosDurability {
 
 impl DurabilityLayer for OmniPaxosDurability {
     fn iter(&self) -> Box<dyn Iterator<Item = (TxOffset, TxData)>> {
-        let mut it = self.omni_paxos.read_entries(..).unwrap_or_default();
-        let entries = it.into_iter().map(|entry| {
-            match entry {
-                Decided(transaction) => (transaction.offset, transaction.data),
-                _ => (),
-            }
-        }).collect();
-        entries
+        let filtered: Vec<(TxOffset, TxData)> = self.omni_paxos.read_entries(..)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|entry|
+                match entry {
+                    Decided(transaction) => Some((transaction.offset, transaction.data)),
+                    _ => None,
+                }
+            ).collect();
+        Box::new(filtered.into_iter())
     }
 
     fn iter_starting_from_offset(
         &self,
         offset: TxOffset,
     ) -> Box<dyn Iterator<Item = (TxOffset, TxData)>> {
-        self.omni_paxos.read_entries(offset..)
+        let filtered: Vec<(TxOffset, TxData)> = self.omni_paxos.read_entries(offset.0..)
             .unwrap_or_default()
             .into_iter()
-            .map(|entry| {
+            .filter_map(|entry|
                 match entry {
-                    Decided(transaction) => (transaction.offset, transaction.data),
-                    _ => (),
+                    Decided(transaction) => Some((transaction.offset, transaction.data)),
+                    _ => None,
                 }
-            }).collect()
+            ).collect();
+        Box::new(filtered.into_iter())
     }
 
     fn append_tx(&mut self, tx_offset: TxOffset, tx_data: TxData) {
