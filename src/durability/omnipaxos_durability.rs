@@ -1,5 +1,6 @@
 use omnipaxos::macros::Entry;
 use omnipaxos::OmniPaxos;
+use omnipaxos::util::LogEntry::Decided;
 use super::*;
 
 use omnipaxos_storage::memory_storage::MemoryStorage;
@@ -20,15 +21,29 @@ pub struct OmniPaxosDurability {
 
 impl DurabilityLayer for OmniPaxosDurability {
     fn iter(&self) -> Box<dyn Iterator<Item = (TxOffset, TxData)>> {
-        let mut it = self.omni_paxos.read_entries(..).unwrap().iter();
-        it
+        let mut it = self.omni_paxos.read_entries(..).unwrap_or_default();
+        let entries = it.into_iter().map(|entry| {
+            match entry {
+                Decided(transaction) => (transaction.offset, transaction.data),
+                _ => (),
+            }
+        }).collect();
+        entries
     }
 
     fn iter_starting_from_offset(
         &self,
         offset: TxOffset,
     ) -> Box<dyn Iterator<Item = (TxOffset, TxData)>> {
-        todo!()
+        self.omni_paxos.read_entries(offset..)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| {
+                match entry {
+                    Decided(transaction) => (transaction.offset, transaction.data),
+                    _ => (),
+                }
+            }).collect()
     }
 
     fn append_tx(&mut self, tx_offset: TxOffset, tx_data: TxData) {

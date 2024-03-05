@@ -1,5 +1,5 @@
 use crate::datastore::error::DatastoreError;
-use crate::datastore::example_datastore::{ExampleDatastore, Tx};
+use crate::datastore::example_datastore::{ExampleDatastore, MutTx, Tx};
 use crate::datastore::tx_data::TxResult;
 use crate::datastore::*;
 use crate::durability::omnipaxos_durability::OmniPaxosDurability;
@@ -63,11 +63,26 @@ impl NodeRunner {
 
     async fn handle_decided_entries(&mut self) {
         println!("{} handling decided entries", self.node_id);
+
+        /// only if we are the leader ?
+
         let mut n = self.node.lock().unwrap();
         if n.omni_durability.get_durable_tx_offset() > n.last_decided_index {
             let _ = n.advance_replicated_durability_offset();
             n.last_decided_index = n.omni_durability.get_durable_tx_offset();
         }
+        todo!();
+    }
+
+    async fn check_leader_changes(&mut self) {
+        println!("{} checking leader changes", self.node_id);
+        let mut n = self.node.lock().unwrap();
+
+        // if there is a leader
+        if let Some(new_leader) = n.omni_durability.omni_paxos.get_current_leader() {
+            n.update_leader(new_leader);
+        }
+
     }
 
     pub async fn run(&mut self) {
@@ -79,13 +94,13 @@ impl NodeRunner {
             tokio::select! {
                 biased;
                 _ = msg_interval.tick() => {
-                    println!("Checking messages tick");
+                    self.check_leader_changes().await;
                     self.process_incoming_msgs().await;
                     self.send_outgoing_msgs().await;
                     //self.handle_decided_entries().await;
                 },
                 _ = tick_interval.tick() => {
-                    println!("omnipaxos tick");
+                    //println!("omnipaxos tick");
                     self.node.lock().unwrap().omni_durability.omni_paxos.tick();
                 },
                 else => (),
@@ -98,7 +113,8 @@ pub struct Node {
     node_id: NodeId, // Unique identifier for the node
     omni_durability: OmniPaxosDurability,
     datastore: ExampleDatastore,
-    last_decided_index: TxOffset
+    last_decided_index: TxOffset,
+    leader: Option<NodeId>
 }
 
 impl Node {
@@ -107,7 +123,8 @@ impl Node {
             node_id,
             omni_durability,
             datastore: ExampleDatastore::new(),
-            last_decided_index: TxOffset(0)
+            last_decided_index: TxOffset(0),
+            leader: None
         }
 
     }
@@ -116,15 +133,39 @@ impl Node {
     /// it needs to apply any unapplied txns to its datastore.
     /// If a node loses leadership, it needs to rollback the txns committed in
     /// memory that have not been replicated yet.
-    pub fn update_leader(&mut self) {
-        todo!()
+    pub fn update_leader(&mut self, new_leader: NodeId) {
+        match self.leader {
+            Some(current_leader) => {
+                // if there is a new leader
+                if (current_leader != new_leader) {
+                    // if we were the leader
+                    if (current_leader == self.node_id) {
+                        self.datastore.rollback_to_replicated_durability_offset().expect("failed to roll back")
+
+                    }
+                    // if we become the leader
+                    else if (new_leader == self.node_id) {
+                        self.apply_replicated_txns()
+
+                    }
+                    // we are a follower changing leader
+                    self.leader = Some(new_leader)
+
+                }
+            }
+            None => self.leader = Some(new_leader)
+        }
     }
 
     /// Apply the transactions that have been decided in OmniPaxos to the Datastore.
     /// We need to be careful with which nodes should do this according to desired
     /// behavior in the Datastore as defined by the application.
     fn apply_replicated_txns(&mut self) {
-        todo!()
+        let mut to_apply = self.omni_durability.iter_starting_from_offset(self.last_decided_index);
+        while let Some(transaction) = to_apply.next() {
+            self.datastore.replay_transaction(&transaction.1)
+
+        }
     }
 
     pub fn begin_tx(&self, durability_level: DurabilityLevel, ) -> <ExampleDatastore as Datastore<String, String>>::Tx {
@@ -148,7 +189,8 @@ impl Node {
         tx: <ExampleDatastore as Datastore<String, String>>::MutTx,
     ) -> Result<TxResult, DatastoreError> {
         let result = self.datastore.commit_mut_tx(tx).expect("Datastore error");
-        todo!()
+        self.omni_durability.append_tx(result.tx_offset.clone(), result.tx_data.clone());
+        Ok(result)
     }
 
     fn advance_replicated_durability_offset(&self, ) -> Result<(), crate::datastore::error::DatastoreError> {
