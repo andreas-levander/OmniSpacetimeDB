@@ -263,13 +263,6 @@ mod tests {
         (senders, receivers)
     }
 
-    fn create_runtime() -> Runtime {
-        Builder::new_multi_thread()
-            .worker_threads(4)
-            .enable_all()
-            .build()
-            .unwrap()
-    }
 
     fn spawn_nodes() -> HashMap<NodeId, (Arc<Mutex<Node>>, JoinHandle<()>)> {
         let mut nodes = HashMap::new();
@@ -381,6 +374,79 @@ mod tests {
                 node.release_tx(tx);
             }
         }
+        // deleting the entry
+        {
+            let leader = get_leader(&nodes);
+            println!("leader: {}", leader);
 
+            let leader_arc = nodes.get(&leader).unwrap();
+            let mut leader_node = (*leader_arc).0.lock().unwrap();
+            let mut t1 = leader_node.begin_mut_tx().unwrap();
+            t1.delete(&"test".to_string());
+            leader_node.commit_mut_tx(t1).expect("Failure commiting transaction");
+            // transaction should be in leader memory
+            let t2 = leader_node.begin_tx(DurabilityLevel::Memory);
+            assert_eq!(t2.get(&"test".to_string()), None);
+            leader_node.release_tx(t2);
+        }
+        // wait for value to be decided
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        // transaction should now be replicated
+        {
+            for (k, v) in &nodes {
+                let node = (*v).0.lock().unwrap();
+                let tx = node.begin_tx(DurabilityLevel::Replicated);
+                assert_eq!(tx.get(&"test".to_string()), None);
+                node.release_tx(tx);
+            }
+        }
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn leader_loss() {
+        let nodes = spawn_nodes();
+
+        // wait for a leader to be elected
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // commit a transaction
+        {
+            let leader = get_leader(&nodes);
+            println!("leader: {}", leader);
+
+            let leader_arc = nodes.get(&leader).unwrap();
+            let mut leader_node = (*leader_arc).0.lock().unwrap();
+            let mut t1 = leader_node.begin_mut_tx().unwrap();
+            t1.set("test".to_string(), "asd".to_string());
+            leader_node.commit_mut_tx(t1).expect("Failure commiting transaction");
+            // transaction should be in leader memory
+            let t2 = leader_node.begin_tx(DurabilityLevel::Memory);
+            assert_eq!(t2.get(&"test".to_string()), Some("asd".to_string()));
+            leader_node.release_tx(t2);
+
+        }
+
+        // wait for value to be replicated
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        // kill leader
+        {
+            let leader = get_leader(&nodes);
+            println!("leader: {}", leader);
+            let leader_arc = nodes.get(&leader).unwrap();
+            (*leader_arc).1.abort();
+        }
+        // waiting for leader swaps
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // check that new leader state is correct
+        {
+            let leader = get_leader(&nodes);
+            println!("leader: {}", leader);
+
+            let leader_arc = nodes.get(&leader).unwrap();
+            let mut leader_node = (*leader_arc).0.lock().unwrap();
+            let t2 = leader_node.begin_tx(DurabilityLevel::Replicated);
+            assert_eq!(t2.get(&"test".to_string()), Some("asd".to_string()));
+            leader_node.release_tx(t2);
+        }
     }
 }
