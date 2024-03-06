@@ -43,7 +43,7 @@ impl NodeRunner {
         //println!("{} sending outgoing messages", self.node_id);
         let msgs = self.node.lock().unwrap().omni_durability.omni_paxos.outgoing_messages();
         for msg in msgs {
-            println!("Send message {:?}", msg);
+            //println!("Send message {:?}", msg);
             let recipient = msg.get_receiver();
             let channel = self.senders.get(&recipient).unwrap();
             channel.clone().send(msg).await.expect("Failed to send message to channel");
@@ -55,27 +55,33 @@ impl NodeRunner {
         let mut rx = self.receivers.get(&self.node_id).unwrap().lock().await;
 
         while let Ok(message) = rx.try_recv() {
-            println!("Id: {} GOT = {:?}", self.node_id, message);
+            //println!("Id: {} GOT = {:?}", self.node_id, message);
             self.node.lock().unwrap().omni_durability.omni_paxos.handle_incoming(message);
         }
 
     }
 
     async fn handle_decided_entries(&mut self) {
-        println!("{} handling decided entries", self.node_id);
 
-        /// only if we are the leader ?
 
         let mut n = self.node.lock().unwrap();
-        if n.omni_durability.get_durable_tx_offset() > n.last_decided_index {
-            let _ = n.advance_replicated_durability_offset();
-            n.last_decided_index = n.omni_durability.get_durable_tx_offset();
+
+        if n.leader.is_some() && n.omni_durability.get_durable_tx_offset().0 != 0 && (n.last_decided_index.is_none() || n.omni_durability.get_durable_tx_offset() > n.last_decided_index.unwrap()) {
+            println!("{} - handling decided entries paxos durable offset: {:?}, last decided: {:?}", self.node_id, n.omni_durability.get_durable_tx_offset(), n.last_decided_index);
+            // if we are a leader
+            if n.leader.unwrap() == n.node_id {
+                let _ = n.advance_replicated_durability_offset();
+                n.last_decided_index = Some(n.omni_durability.get_durable_tx_offset());
+            }
+            // we are a follower
+            else {
+                n.apply_replicated_txns();
+            }
         }
-        todo!();
     }
 
     async fn check_leader_changes(&mut self) {
-        println!("{} checking leader changes", self.node_id);
+        //println!("{} checking leader changes", self.node_id);
         let mut n = self.node.lock().unwrap();
 
         // if there is a leader
@@ -97,7 +103,7 @@ impl NodeRunner {
                     self.check_leader_changes().await;
                     self.process_incoming_msgs().await;
                     self.send_outgoing_msgs().await;
-                    //self.handle_decided_entries().await;
+                    self.handle_decided_entries().await;
                 },
                 _ = tick_interval.tick() => {
                     //println!("omnipaxos tick");
@@ -111,9 +117,9 @@ impl NodeRunner {
 
 pub struct Node {
     node_id: NodeId, // Unique identifier for the node
-    omni_durability: OmniPaxosDurability,
+    pub omni_durability: OmniPaxosDurability,
     datastore: ExampleDatastore,
-    last_decided_index: TxOffset,
+    last_decided_index: Option<TxOffset>,
     leader: Option<NodeId>
 }
 
@@ -123,7 +129,7 @@ impl Node {
             node_id,
             omni_durability,
             datastore: ExampleDatastore::new(),
-            last_decided_index: TxOffset(0),
+            last_decided_index: None,
             leader: None
         }
 
@@ -163,11 +169,26 @@ impl Node {
     /// We need to be careful with which nodes should do this according to desired
     /// behavior in the Datastore as defined by the application.
     fn apply_replicated_txns(&mut self) {
-        let mut to_apply = self.omni_durability.iter_starting_from_offset(self.last_decided_index);
+        let mut next_offset = None;
+        if self.last_decided_index.is_none(){
+            next_offset = Some(TxOffset(0));
+        }
+        else {
+            next_offset = Some(self.last_decided_index.unwrap());
+        }
+        println!("{} - applying replicated transactions from offset: {:?}", self.node_id, next_offset);
+        let mut to_apply = self.omni_durability.iter_starting_from_offset(next_offset.unwrap());
+        let mut changes = false;
         while let Some(transaction) = to_apply.next() {
-            self.datastore.replay_transaction(&transaction.1).expect("Failed to replay transaction")
+            println!("{} - replaying transaction: {:?}", self.node_id, transaction);
+            self.datastore.replay_transaction(&transaction.1).expect("Failed to replay transaction");
+            changes = true;
 
         };
+        if changes {
+            self.last_decided_index = Some(self.omni_durability.get_durable_tx_offset());
+        }
+
     }
 
     pub fn begin_tx(&self, durability_level: DurabilityLevel, ) -> <ExampleDatastore as Datastore<String, String>>::Tx {
@@ -196,7 +217,9 @@ impl Node {
     }
 
     fn advance_replicated_durability_offset(&self, ) -> Result<(), crate::datastore::error::DatastoreError> {
-        self.datastore.advance_replicated_durability_offset(self.omni_durability.get_durable_tx_offset())
+        let omni_paxos_durable_offset = TxOffset(self.omni_durability.get_durable_tx_offset().0 - 1);
+        println!("{} - advancing replicated durability offset to: {:?}", self.node_id, omni_paxos_durable_offset);
+        self.datastore.advance_replicated_durability_offset(omni_paxos_durable_offset)
     }
 }
 
@@ -233,7 +256,7 @@ mod tests {
         let mut senders: HashMap<NodeId, mpsc::Sender<Message<Transaction>>> = HashMap::new();
         let mut receivers: HashMap<NodeId, AsyncMutex<mpsc::Receiver<Message<Transaction>>>> = HashMap::new();
         for s in SERVERS {
-            let (tx, mut rx) = mpsc::channel::<Message<Transaction>>(10);
+            let (tx, mut rx) = mpsc::channel::<Message<Transaction>>(100);
             senders.insert(s, tx);
             receivers.insert(s, AsyncMutex::new(rx));
         }
@@ -294,6 +317,13 @@ mod tests {
         nodes
     }
 
+    fn get_leader(nodes: &HashMap<NodeId, (Arc<Mutex<Node>>, JoinHandle<()>)>) -> NodeId {
+        let first = nodes.get(&1).unwrap();
+        let node_1 = (*first).0.lock().unwrap();
+        let leader = node_1.omni_durability.omni_paxos.get_current_leader().expect("Leader not found");
+        leader
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn basic_test() {
         let nodes = spawn_nodes();
@@ -304,5 +334,53 @@ mod tests {
 
         tokio::time::sleep(Duration::from_secs(5)).await;
         assert_eq!(nodes.len(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn replication_works() {
+        let nodes = spawn_nodes();
+
+        // wait for a leader to be elected
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        {
+            let leader = get_leader(&nodes);
+            println!("leader: {}", leader);
+
+            let leader_arc = nodes.get(&leader).unwrap();
+            let mut leader_node = (*leader_arc).0.lock().unwrap();
+            let mut t1 = leader_node.begin_mut_tx().unwrap();
+            t1.set("test".to_string(), "asd".to_string());
+            leader_node.commit_mut_tx(t1).expect("Failure commiting transaction");
+            // transaction should be in leader memory
+            let t2 = leader_node.begin_tx(DurabilityLevel::Memory);
+            assert_eq!(t2.get(&"test".to_string()), Some("asd".to_string()));
+            leader_node.release_tx(t2);
+
+        }
+        // wait for value to be decided
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        // value now decided and in replicated storage in leader
+        {
+            let leader = get_leader(&nodes);
+            println!("leader: {}", leader);
+
+            let leader_arc = nodes.get(&leader).unwrap();
+            let mut leader_node = (*leader_arc).0.lock().unwrap();
+            let t2 = leader_node.begin_tx(DurabilityLevel::Replicated);
+            assert_eq!(t2.get(&"test".to_string()), Some("asd".to_string()));
+            leader_node.release_tx(t2);
+        }
+
+        // value now decided and replicated in all nodes
+        {
+            for (k, v) in &nodes {
+                let node = (*v).0.lock().unwrap();
+                let tx = node.begin_tx(DurabilityLevel::Replicated);
+                assert_eq!(tx.get(&"test".to_string()), Some("asd".to_string()));
+                node.release_tx(tx);
+            }
+        }
+
     }
 }

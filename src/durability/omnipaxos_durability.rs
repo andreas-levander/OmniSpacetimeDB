@@ -46,6 +46,8 @@ impl DurabilityLayer for OmniPaxosDurability {
                     _ => None,
                 }
             ).collect();
+        println!("{:?} - filtered entries from offset", self.omni_paxos.read_decided_suffix(offset.0));
+        println!("{:?} - filtered entries all", self.omni_paxos.read_decided_suffix(0));
         Box::new(filtered.into_iter())
     }
 
