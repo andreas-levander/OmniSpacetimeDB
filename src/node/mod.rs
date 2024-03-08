@@ -7,7 +7,7 @@ use crate::durability::{DurabilityLayer, DurabilityLevel};
 use crate::durability::omnipaxos_durability::Transaction;
 use omnipaxos::messages::*;
 use omnipaxos::util::NodeId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use omnipaxos::macros::Entry;
 use omnipaxos::messages::sequence_paxos::PaxosMessage;
@@ -55,15 +55,19 @@ impl NodeRunner {
         let mut rx = self.receivers.get(&self.node_id).unwrap().lock().await;
 
         while let Ok(message) = rx.try_recv() {
-            //println!("Id: {} GOT = {:?}", self.node_id, message);
-            self.node.lock().unwrap().omni_durability.omni_paxos.handle_incoming(message);
+            let mut node = self.node.lock().unwrap();
+            // if receiver is not blocked
+            let sender = message.get_sender();
+            //println!("{} - blocked nodes: {:?} rec: {} contains: {}", self.node_id, node.blocked_nodes, sender, node.blocked_nodes.contains(&sender));
+            if !node.blocked_nodes.contains(&sender) {
+                //println!("Id: {} GOT = {:?}", self.node_id, message);
+                node.omni_durability.omni_paxos.handle_incoming(message);
+            }
         }
 
     }
 
     async fn handle_decided_entries(&mut self) {
-
-
         let mut n = self.node.lock().unwrap();
 
         if n.leader.is_some() && n.omni_durability.get_durable_tx_offset().0 != 0 && (n.last_decided_index.is_none() || n.omni_durability.get_durable_tx_offset() > n.last_decided_index.unwrap()) {
@@ -120,7 +124,8 @@ pub struct Node {
     pub omni_durability: OmniPaxosDurability,
     datastore: ExampleDatastore,
     last_decided_index: Option<TxOffset>,
-    leader: Option<NodeId>
+    leader: Option<NodeId>,
+    blocked_nodes: HashSet<NodeId>, // used to simulate loss of connection
 }
 
 impl Node {
@@ -130,7 +135,8 @@ impl Node {
             omni_durability,
             datastore: ExampleDatastore::new(),
             last_decided_index: None,
-            leader: None
+            leader: None,
+            blocked_nodes: HashSet::new()
         }
 
     }
@@ -147,6 +153,7 @@ impl Node {
                 if (current_leader != new_leader) {
                     // if we were the leader
                     if (current_leader == self.node_id) {
+                        println!("{} - rolling back to replicated offset: {:?}", self.node_id, self.last_decided_index);
                         self.datastore.rollback_to_replicated_durability_offset().expect("failed to roll back")
 
                     }
@@ -169,7 +176,7 @@ impl Node {
     /// We need to be careful with which nodes should do this according to desired
     /// behavior in the Datastore as defined by the application.
     fn apply_replicated_txns(&mut self) {
-        let mut next_offset = None;
+        let mut next_offset;
         if self.last_decided_index.is_none(){
             next_offset = Some(TxOffset(0));
         }
@@ -310,73 +317,81 @@ mod tests {
         nodes
     }
 
-    fn get_leader(nodes: &HashMap<NodeId, (Arc<Mutex<Node>>, JoinHandle<()>)>) -> NodeId {
-        let first = nodes.get(&1).unwrap();
+    fn get_leader(nodes: &HashMap<NodeId, (Arc<Mutex<Node>>, JoinHandle<()>)>, ask: &NodeId) -> NodeId {
+        let first = nodes.get(ask).unwrap();
         let node_1 = (*first).0.lock().unwrap();
         let leader = node_1.omni_durability.omni_paxos.get_current_leader().expect("Leader not found");
         leader
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn basic_test() {
-        let nodes = spawn_nodes();
-        println!("test: basic test running");
-        for (key, value) in &nodes {
-            println!("{}:", key);
+    fn select_not_given(node_id: &NodeId) -> NodeId {
+        match node_id {
+            &1 => 2,
+            _ => 1
         }
-
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        assert_eq!(nodes.len(), 3);
     }
+
+    fn leader_commit_key_value(nodes: &HashMap<NodeId, (Arc<Mutex<Node>>, JoinHandle<()>)>, leader: &NodeId, k: String, v: String)  {
+        println!("leader: {} committing new key-value: {k}, {v}", leader);
+
+        let leader_arc = nodes.get(leader).unwrap();
+        let mut leader_node = (*leader_arc).0.lock().unwrap();
+        let mut t1 = leader_node.begin_mut_tx().unwrap();
+        t1.set(k.clone(), v.clone());
+        leader_node.commit_mut_tx(t1).expect("Failure commiting transaction");
+        // transaction should be in leader memory
+        let t2 = leader_node.begin_tx(DurabilityLevel::Memory);
+        assert_eq!(t2.get(&k), Some(v));
+        leader_node.release_tx(t2);
+    }
+
+    fn get_key(nodes: &HashMap<NodeId, (Arc<Mutex<Node>>, JoinHandle<()>)>, node_id: &NodeId, replication_level: DurabilityLevel, k: String) -> Option<String> {
+        let node_arc = nodes.get(node_id).unwrap();
+        let node = (*node_arc).0.lock().unwrap();
+        let t2 = node.begin_tx(replication_level);
+        let value = t2.get(&k);
+        node.release_tx(t2);
+        value
+    }
+
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn replication_works() {
         let nodes = spawn_nodes();
 
         // wait for a leader to be elected
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
         {
-            let leader = get_leader(&nodes);
+            let leader = get_leader(&nodes, &1);
             println!("leader: {}", leader);
 
-            let leader_arc = nodes.get(&leader).unwrap();
-            let mut leader_node = (*leader_arc).0.lock().unwrap();
-            let mut t1 = leader_node.begin_mut_tx().unwrap();
-            t1.set("test".to_string(), "asd".to_string());
-            leader_node.commit_mut_tx(t1).expect("Failure commiting transaction");
-            // transaction should be in leader memory
-            let t2 = leader_node.begin_tx(DurabilityLevel::Memory);
-            assert_eq!(t2.get(&"test".to_string()), Some("asd".to_string()));
-            leader_node.release_tx(t2);
+            leader_commit_key_value(&nodes, &leader, "test".to_string(), "asd".to_string());
 
         }
         // wait for value to be decided
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
         // value now decided and in replicated storage in leader
         {
-            let leader = get_leader(&nodes);
+            let leader = get_leader(&nodes, &1);
             println!("leader: {}", leader);
 
-            let leader_arc = nodes.get(&leader).unwrap();
-            let mut leader_node = (*leader_arc).0.lock().unwrap();
-            let t2 = leader_node.begin_tx(DurabilityLevel::Replicated);
-            assert_eq!(t2.get(&"test".to_string()), Some("asd".to_string()));
-            leader_node.release_tx(t2);
+            let val = get_key(&nodes, &leader, DurabilityLevel::Replicated, "test".to_string());
+            assert!(val.is_some());
+            assert_eq!(val.unwrap(), "asd");
         }
 
         // value now decided and replicated in all nodes
         {
-            for (k, v) in &nodes {
-                let node = (*v).0.lock().unwrap();
-                let tx = node.begin_tx(DurabilityLevel::Replicated);
-                assert_eq!(tx.get(&"test".to_string()), Some("asd".to_string()));
-                node.release_tx(tx);
+            for s in SERVERS {
+                let val = get_key(&nodes, &s, DurabilityLevel::Replicated, "test".to_string());
+                assert!(val.is_some());
+                assert_eq!(val.unwrap(), "asd");
             }
         }
         // deleting the entry
         {
-            let leader = get_leader(&nodes);
+            let leader = get_leader(&nodes, &1);
             println!("leader: {}", leader);
 
             let leader_arc = nodes.get(&leader).unwrap();
@@ -390,14 +405,12 @@ mod tests {
             leader_node.release_tx(t2);
         }
         // wait for value to be decided
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
         // transaction should now be replicated
         {
-            for (k, v) in &nodes {
-                let node = (*v).0.lock().unwrap();
-                let tx = node.begin_tx(DurabilityLevel::Replicated);
-                assert_eq!(tx.get(&"test".to_string()), None);
-                node.release_tx(tx);
+            for s in SERVERS {
+                let val = get_key(&nodes, &s, DurabilityLevel::Replicated, "test".to_string());
+                assert!(val.is_none());
             }
         }
     }
@@ -406,11 +419,55 @@ mod tests {
         let nodes = spawn_nodes();
 
         // wait for a leader to be elected
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
         // commit a transaction
         {
-            let leader = get_leader(&nodes);
+            let leader = get_leader(&nodes, &1);
+            println!("leader: {}", leader);
+
+            leader_commit_key_value(&nodes, &leader, "test".to_string(), "asd".to_string());
+
+        }
+
+        // wait for value to be replicated
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        // kill leader
+        let mut old_leader: NodeId;
+        {
+            let leader = get_leader(&nodes, &1);
+            println!("leader: {}", leader);
+            old_leader = leader;
+            let leader_arc = nodes.get(&leader).unwrap();
+            (*leader_arc).1.abort();
+        }
+        // waiting for leader swaps
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // check that new leader state is correct
+        {
+            let leader = get_leader(&nodes, &select_not_given(&old_leader));
+            println!("new leader: {}", leader);
+            assert_ne!(leader, old_leader);
+
+            let val = get_key(&nodes, &leader, DurabilityLevel::Replicated, "test".to_string());
+            assert_eq!(val, Some("asd".to_string()));
+
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn leader_fully_disconnected() {
+        let nodes = spawn_nodes();
+
+        // wait for a leader to be elected
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let mut original_leader: NodeId;
+        // commit a transaction
+        {
+            let leader = get_leader(&nodes, &1);
+            original_leader = leader;
             println!("leader: {}", leader);
 
             let leader_arc = nodes.get(&leader).unwrap();
@@ -423,30 +480,100 @@ mod tests {
             assert_eq!(t2.get(&"test".to_string()), Some("asd".to_string()));
             leader_node.release_tx(t2);
 
+
+            // disconnect leader
+            let mut others = SERVERS.iter().filter(|x| {*(*x) != leader});
+            while let Some(id) = others.next() {
+                println!("{id} blocking {leader}");
+                let node = nodes.get(id).unwrap();
+                (*node).0.lock().unwrap().blocked_nodes.insert(leader);
+                leader_node.blocked_nodes.insert(*id);
+            }
+
         }
 
-        // wait for value to be replicated
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        // kill leader
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
         {
-            let leader = get_leader(&nodes);
-            println!("leader: {}", leader);
-            let leader_arc = nodes.get(&leader).unwrap();
-            (*leader_arc).1.abort();
+            // leader should still be original leader
+
+            let leader = get_leader(&nodes, &select_not_given(&original_leader));
+            assert_eq!(leader, original_leader);
+            println!("leader still: {}", leader);
+
+            // keep adding values
+            leader_commit_key_value(&nodes, &leader, "test2".to_string(), "value2".to_string());
+            leader_commit_key_value(&nodes, &leader, "test3".to_string(), "value3".to_string());
         }
-        // waiting for leader swaps
+
+        // wait for new leader
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         // check that new leader state is correct
         {
-            let leader = get_leader(&nodes);
+            let leader = get_leader(&nodes, &select_not_given(&original_leader));
+            println!("leader: {}", leader);
+            // leader should have changed in majority
+            assert_ne!(leader, original_leader);
+
+            let val = get_key(&nodes, &leader, DurabilityLevel::Replicated, "test".to_string());
+            assert!(val.is_none());
+
+            // original leader still thinks it is the leader
+            assert_eq!(original_leader, get_leader(&nodes, &original_leader));
+
+            // new leader should be able to commit new values
+            leader_commit_key_value(&nodes, &leader, "new".to_string(), "works".to_string());
+        }
+
+        // wait for replication
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        {
+            let leader = get_leader(&nodes, &select_not_given(&original_leader));
             println!("leader: {}", leader);
 
-            let leader_arc = nodes.get(&leader).unwrap();
-            let mut leader_node = (*leader_arc).0.lock().unwrap();
-            let t2 = leader_node.begin_tx(DurabilityLevel::Replicated);
-            assert_eq!(t2.get(&"test".to_string()), Some("asd".to_string()));
-            leader_node.release_tx(t2);
+            // value now replicated in new chorum
+            let val = get_key(&nodes, &leader, DurabilityLevel::Replicated, "new".to_string());
+            assert!(val.is_some());
+            assert_eq!(val.unwrap(), "works");
+
+            //reconnect old leader
+            let mut others = SERVERS.iter().filter(|x| {*(*x) != original_leader});
+            let old_leader_arc = nodes.get(&original_leader).unwrap();
+            let mut old_leader_node = (*old_leader_arc).0.lock().unwrap();
+            while let Some(id) = others.next() {
+                println!("{id} un-blocking {original_leader}");
+                let node = nodes.get(id).unwrap();
+                (*node).0.lock().unwrap().blocked_nodes.remove(&original_leader);
+                old_leader_node.blocked_nodes.remove(id);
+            }
+        }
+        // wait for stabilization
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        {
+            for s in SERVERS {
+                // all nodes should have new value
+                let val = get_key(&nodes, &s, DurabilityLevel::Replicated, "new".to_string());
+                assert!(val.is_some());
+                assert_eq!(val.unwrap(), "works");
+
+                // none should have non-decided values
+                let val = get_key(&nodes, &s, DurabilityLevel::Replicated, "test".to_string());
+                assert!(val.is_none());
+                let val_mem = get_key(&nodes, &s, DurabilityLevel::Memory, "test".to_string());
+                assert!(val_mem.is_none());
+
+                let val = get_key(&nodes, &s, DurabilityLevel::Replicated, "test1".to_string());
+                assert!(val.is_none());
+                let val_mem = get_key(&nodes, &s, DurabilityLevel::Memory, "test1".to_string());
+                assert!(val_mem.is_none());
+
+                let val = get_key(&nodes, &s, DurabilityLevel::Replicated, "test2".to_string());
+                assert!(val.is_none());
+                let val_mem = get_key(&nodes, &s, DurabilityLevel::Memory, "test2".to_string());
+                assert!(val_mem.is_none());
+            }
         }
     }
 }
