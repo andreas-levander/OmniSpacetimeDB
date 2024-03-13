@@ -1,5 +1,5 @@
 use crate::datastore::error::DatastoreError;
-use crate::datastore::example_datastore::{ExampleDatastore, MutTx, Tx};
+use crate::datastore::example_datastore::{ExampleDatastore};
 use crate::datastore::tx_data::TxResult;
 use crate::datastore::*;
 use crate::durability::omnipaxos_durability::OmniPaxosDurability;
@@ -10,9 +10,7 @@ use omnipaxos::util::NodeId;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use omnipaxos::macros::Entry;
-use omnipaxos::messages::sequence_paxos::PaxosMessage;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::Receiver;
 use tokio::time;
 use tokio::time::{Duration};
 use tokio::sync::{Mutex as AsyncMutex};
@@ -150,15 +148,15 @@ impl Node {
             Some(current_leader) => {
 
                 // if there is a new leader
-                if (current_leader != new_leader) {
+                if current_leader != new_leader {
                     // if we were the leader
-                    if (current_leader == self.node_id) {
+                    if current_leader == self.node_id {
                         println!("{} - rolling back to replicated offset: {:?}", self.node_id, self.last_decided_index);
                         self.datastore.rollback_to_replicated_durability_offset().expect("failed to roll back")
 
                     }
                     // if we become the leader
-                    else if (new_leader == self.node_id) {
+                    else if new_leader == self.node_id {
                         self.apply_replicated_txns()
 
                     }
@@ -176,7 +174,7 @@ impl Node {
     /// We need to be careful with which nodes should do this according to desired
     /// behavior in the Datastore as defined by the application.
     fn apply_replicated_txns(&mut self) {
-        let mut next_offset;
+        let next_offset;
         if self.last_decided_index.is_none(){
             next_offset = Some(TxOffset(0));
         }
@@ -223,7 +221,7 @@ impl Node {
         Ok(result)
     }
 
-    fn advance_replicated_durability_offset(&self, ) -> Result<(), crate::datastore::error::DatastoreError> {
+    fn advance_replicated_durability_offset(&self, ) -> Result<(), DatastoreError> {
         let omni_paxos_durable_offset = TxOffset(self.omni_durability.get_durable_tx_offset().0 - 1);
         println!("{} - advancing replicated durability offset to: {:?}", self.node_id, omni_paxos_durable_offset);
         self.datastore.advance_replicated_durability_offset(omni_paxos_durable_offset)
@@ -244,48 +242,46 @@ mod tests {
     use omnipaxos::messages::Message;
     use omnipaxos::util::NodeId;
     use std::collections::HashMap;
-    use std::ops::Deref;
     use std::sync::{Arc, Mutex};
-    use std::thread::sleep;
     use omnipaxos::{ClusterConfig, OmniPaxosConfig, ServerConfig};
     use omnipaxos_storage::memory_storage::MemoryStorage;
-    use tokio::runtime::{Builder, Runtime};
     use tokio::sync::mpsc;
     use tokio::task::JoinHandle;
 
-    const SERVERS: [NodeId; 3] = [1, 2, 3];
+
 
     #[allow(clippy::type_complexity)]
-    fn initialise_channels() -> (
+    fn initialise_channels(servers: &Vec<NodeId>) -> (
         HashMap<NodeId, mpsc::Sender<Message<Transaction>>>,
         HashMap<NodeId, AsyncMutex<mpsc::Receiver<Message<Transaction>>>>,
     ) {
         let mut senders: HashMap<NodeId, mpsc::Sender<Message<Transaction>>> = HashMap::new();
         let mut receivers: HashMap<NodeId, AsyncMutex<mpsc::Receiver<Message<Transaction>>>> = HashMap::new();
-        for s in SERVERS {
-            let (tx, mut rx) = mpsc::channel::<Message<Transaction>>(100);
-            senders.insert(s, tx);
-            receivers.insert(s, AsyncMutex::new(rx));
+        for s in servers {
+            let (tx, rx) = mpsc::channel::<Message<Transaction>>(100);
+            senders.insert(s.clone(), tx);
+            receivers.insert(s.clone(), AsyncMutex::new(rx));
         }
         (senders, receivers)
     }
 
 
-    fn spawn_nodes() -> HashMap<NodeId, (Arc<Mutex<Node>>, JoinHandle<()>)> {
+    fn spawn_nodes(num_of_servers: NodeId) -> HashMap<NodeId, (Arc<Mutex<Node>>, JoinHandle<()>)> {
+        let servers: Vec<NodeId> = Vec::from_iter(1..=num_of_servers);
         let mut nodes = HashMap::new();
-        let (sender_channels, mut receiver_channels) = initialise_channels();
+        let (sender_channels, receiver_channels) = initialise_channels(&servers);
         let senders = Arc::new(sender_channels);
         let receivers = Arc::new(receiver_channels);
-        for pid in SERVERS {
+        for pid in &servers {
 
             let server_config = ServerConfig {
-                pid,
+                pid: pid.clone(),
                 election_tick_timeout: 5,
                 ..Default::default()
             };
             let cluster_config = ClusterConfig {
                 configuration_id: 1,
-                nodes: Vec::from(SERVERS),
+                nodes: servers.clone(),
                 ..Default::default()
             };
             let op_config = OmniPaxosConfig {
@@ -297,7 +293,7 @@ mod tests {
                 .expect("failed to build OmniPaxos");
 
             let node = Arc::new(Mutex::new(Node::new(
-                pid,
+                pid.clone(),
                 OmniPaxosDurability{omni_paxos},
             )));
 
@@ -305,14 +301,14 @@ mod tests {
                 node: node.clone(),
                 senders: senders.clone(),
                 receivers: receivers.clone(),
-                node_id: pid,
+                node_id: pid.clone(),
             };
 
             let handle = tokio::spawn(async move {
                 runner.run().await;
 
             });
-            nodes.insert(pid, (node, handle));
+            nodes.insert(pid.clone(), (node, handle));
         }
         nodes
     }
@@ -354,10 +350,34 @@ mod tests {
         value
     }
 
+    fn disconnect_nodes(nodes: &HashMap<NodeId, (Arc<Mutex<Node>>, JoinHandle<()>)>, node_a: &NodeId, node_b: &NodeId) {
+        println!("Blocking: {node_a} and {node_b}");
+        let node_a_arc = nodes.get(node_a).unwrap();
+        let mut n_a = (*node_a_arc).0.lock().unwrap();
+
+        let node_b_arc = nodes.get(node_b).unwrap();
+        let mut n_b = (*node_b_arc).0.lock().unwrap();
+
+        n_a.blocked_nodes.insert(*node_b);
+        n_b.blocked_nodes.insert(*node_a);
+    }
+
+    fn connect_nodes(nodes: &HashMap<NodeId, (Arc<Mutex<Node>>, JoinHandle<()>)>, node_a: &NodeId, node_b: &NodeId) {
+        println!("Connecting: {node_a} and {node_b}");
+        let node_a_arc = nodes.get(node_a).unwrap();
+        let mut n_a = (*node_a_arc).0.lock().unwrap();
+
+        let node_b_arc = nodes.get(node_b).unwrap();
+        let mut n_b = (*node_b_arc).0.lock().unwrap();
+
+        n_a.blocked_nodes.remove(node_b);
+        n_b.blocked_nodes.remove(node_a);
+    }
+
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn replication_works() {
-        let nodes = spawn_nodes();
+        let nodes = spawn_nodes(3);
 
         // wait for a leader to be elected
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -383,8 +403,8 @@ mod tests {
 
         // value now decided and replicated in all nodes
         {
-            for s in SERVERS {
-                let val = get_key(&nodes, &s, DurabilityLevel::Replicated, "test".to_string());
+            for s in nodes.keys() {
+                let val = get_key(&nodes, s, DurabilityLevel::Replicated, "test".to_string());
                 assert!(val.is_some());
                 assert_eq!(val.unwrap(), "asd");
             }
@@ -408,15 +428,15 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(500)).await;
         // transaction should now be replicated
         {
-            for s in SERVERS {
-                let val = get_key(&nodes, &s, DurabilityLevel::Replicated, "test".to_string());
+            for s in nodes.keys() {
+                let val = get_key(&nodes, s, DurabilityLevel::Replicated, "test".to_string());
                 assert!(val.is_none());
             }
         }
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn leader_loss() {
-        let nodes = spawn_nodes();
+        let nodes = spawn_nodes(3);
 
         // wait for a leader to be elected
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -428,12 +448,15 @@ mod tests {
 
             leader_commit_key_value(&nodes, &leader, "test".to_string(), "asd".to_string());
 
+            for s in nodes.keys() {
+                println!("lul test : {s}")
+            }
         }
 
         // wait for value to be replicated
         tokio::time::sleep(Duration::from_millis(500)).await;
         // kill leader
-        let mut old_leader: NodeId;
+        let old_leader: NodeId;
         {
             let leader = get_leader(&nodes, &1);
             println!("leader: {}", leader);
@@ -458,37 +481,25 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn leader_fully_disconnected() {
-        let nodes = spawn_nodes();
+        let nodes = spawn_nodes(3);
 
         // wait for a leader to be elected
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
-        let mut original_leader: NodeId;
+        let original_leader: NodeId;
         // commit a transaction
         {
             let leader = get_leader(&nodes, &1);
             original_leader = leader;
             println!("leader: {}", leader);
 
-            let leader_arc = nodes.get(&leader).unwrap();
-            let mut leader_node = (*leader_arc).0.lock().unwrap();
-            let mut t1 = leader_node.begin_mut_tx().unwrap();
-            t1.set("test".to_string(), "asd".to_string());
-            leader_node.commit_mut_tx(t1).expect("Failure commiting transaction");
-            // transaction should be in leader memory
-            let t2 = leader_node.begin_tx(DurabilityLevel::Memory);
-            assert_eq!(t2.get(&"test".to_string()), Some("asd".to_string()));
-            leader_node.release_tx(t2);
-
-
             // disconnect leader
-            let mut others = SERVERS.iter().filter(|x| {*(*x) != leader});
+            let mut others = nodes.keys().into_iter().filter(|x| {*(*x) != leader});
             while let Some(id) = others.next() {
-                println!("{id} blocking {leader}");
-                let node = nodes.get(id).unwrap();
-                (*node).0.lock().unwrap().blocked_nodes.insert(leader);
-                leader_node.blocked_nodes.insert(*id);
+                disconnect_nodes(&nodes, id, &leader);
             }
+
+            leader_commit_key_value(&nodes, &leader, "test".to_string(), "asd".to_string());
 
         }
 
@@ -538,42 +549,68 @@ mod tests {
             assert_eq!(val.unwrap(), "works");
 
             //reconnect old leader
-            let mut others = SERVERS.iter().filter(|x| {*(*x) != original_leader});
-            let old_leader_arc = nodes.get(&original_leader).unwrap();
-            let mut old_leader_node = (*old_leader_arc).0.lock().unwrap();
+            let mut others = nodes.keys().into_iter().filter(|x| {*(*x) != original_leader});
             while let Some(id) = others.next() {
-                println!("{id} un-blocking {original_leader}");
-                let node = nodes.get(id).unwrap();
-                (*node).0.lock().unwrap().blocked_nodes.remove(&original_leader);
-                old_leader_node.blocked_nodes.remove(id);
+                connect_nodes(&nodes, id, &original_leader);
             }
         }
         // wait for stabilization
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(1000)).await;
 
         {
-            for s in SERVERS {
+            for s in nodes.keys() {
                 // all nodes should have new value
-                let val = get_key(&nodes, &s, DurabilityLevel::Replicated, "new".to_string());
+                let val = get_key(&nodes, s, DurabilityLevel::Replicated, "new".to_string());
                 assert!(val.is_some());
                 assert_eq!(val.unwrap(), "works");
 
                 // none should have non-decided values
-                let val = get_key(&nodes, &s, DurabilityLevel::Replicated, "test".to_string());
+                let val = get_key(&nodes, s, DurabilityLevel::Replicated, "test".to_string());
                 assert!(val.is_none());
-                let val_mem = get_key(&nodes, &s, DurabilityLevel::Memory, "test".to_string());
+                let val_mem = get_key(&nodes, s, DurabilityLevel::Memory, "test".to_string());
                 assert!(val_mem.is_none());
 
-                let val = get_key(&nodes, &s, DurabilityLevel::Replicated, "test1".to_string());
+                let val = get_key(&nodes, s, DurabilityLevel::Replicated, "test1".to_string());
                 assert!(val.is_none());
-                let val_mem = get_key(&nodes, &s, DurabilityLevel::Memory, "test1".to_string());
+                let val_mem = get_key(&nodes, s, DurabilityLevel::Memory, "test1".to_string());
                 assert!(val_mem.is_none());
 
-                let val = get_key(&nodes, &s, DurabilityLevel::Replicated, "test2".to_string());
+                let val = get_key(&nodes, s, DurabilityLevel::Replicated, "test2".to_string());
                 assert!(val.is_none());
-                let val_mem = get_key(&nodes, &s, DurabilityLevel::Memory, "test2".to_string());
+                let val_mem = get_key(&nodes, s, DurabilityLevel::Memory, "test2".to_string());
                 assert!(val_mem.is_none());
             }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn chained_scenario() {
+        let nodes = spawn_nodes(3);
+        // wait for leader election
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        {
+            let leader = get_leader(&nodes, &1);
+            println!("leader: {}", leader);
+
+            let selected = select_not_given(&leader);
+
+            disconnect_nodes(&nodes, &leader, &selected);
+        }
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // we can still make progress
+        {
+            let leader = get_leader(&nodes, &1);
+            leader_commit_key_value(&nodes, &leader, "still".to_string(), "make_progress".to_string());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        {
+            let leader = get_leader(&nodes, &1);
+            let val = get_key(&nodes, &leader, DurabilityLevel::Replicated, "still".to_string());
+            assert!(val.is_some());
+            assert_eq!(val.unwrap(), "make_progress");
         }
     }
 }
