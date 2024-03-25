@@ -2,8 +2,6 @@ pub mod example_durability;
 pub mod omnipaxos_durability;
 
 use crate::datastore::{tx_data::TxData, TxOffset};
-use std::sync::Arc;
-
 pub enum DurabilityLevel {
     Memory,
     Replicated,
@@ -11,7 +9,6 @@ pub enum DurabilityLevel {
 
 #[derive(Debug, Copy, Clone)]
 pub struct ObserverId(u64);
-
 
 
 pub trait DurabilityLayer {

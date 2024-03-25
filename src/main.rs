@@ -49,7 +49,7 @@ fn initialise_channels() -> (
     let mut senders: HashMap<NodeId, mpsc::Sender<Message<Transaction>>> = HashMap::new();
     let mut receivers: HashMap<NodeId, AsyncMutex<mpsc::Receiver<Message<Transaction>>>> = HashMap::new();
     for s in SERVERS {
-        let (tx, mut rx) = mpsc::channel::<Message<Transaction>>(10);
+        let (tx, rx) = mpsc::channel::<Message<Transaction>>(10);
         senders.insert(s, tx);
         receivers.insert(s, AsyncMutex::new(rx));
     }
@@ -60,7 +60,7 @@ fn initialise_channels() -> (
 
 fn spawn_nodes() -> HashMap<NodeId, (Arc<Mutex<Node>>, JoinHandle<()>)>  {
     let mut nodes = HashMap::new();
-    let (sender_channels, mut receiver_channels) = initialise_channels();
+    let (sender_channels, receiver_channels) = initialise_channels();
     let senders = Arc::new(sender_channels);
     let receivers = Arc::new(receiver_channels);
     for pid in SERVERS {

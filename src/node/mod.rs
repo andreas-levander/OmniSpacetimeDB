@@ -9,25 +9,10 @@ use omnipaxos::messages::*;
 use omnipaxos::util::NodeId;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use omnipaxos::macros::Entry;
 use tokio::sync::mpsc;
 use tokio::time;
 use tokio::time::{Duration};
 use tokio::sync::{Mutex as AsyncMutex};
-
-#[derive(Clone, Debug)]
-pub struct KeyValue {
-    pub key: String,
-    pub value: String,
-}
-
-#[derive(Debug, Clone, Entry)]
-pub enum KVCommand {
-    Put(KeyValue),
-    Delete(String),
-    Get(String),
-}
-
 
 pub struct NodeRunner {
     pub node: Arc<Mutex<Node>>,
@@ -259,7 +244,7 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::task::JoinHandle;
 
-
+    const TIMEOUT: u64 = 1000; // Timeout in milliseconds for tests when waiting for omnipaxos to reach consensus
 
     #[allow(clippy::type_complexity)]
     fn initialise_channels(servers: &Vec<NodeId>) -> (
@@ -391,7 +376,7 @@ mod tests {
         let nodes = spawn_nodes(3);
 
         // wait for a leader to be elected
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(TIMEOUT)).await;
         {
             let leader = get_leader(&nodes, &1);
             println!("leader: {}", leader);
@@ -400,7 +385,7 @@ mod tests {
 
         }
         // wait for value to be decided
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(TIMEOUT)).await;
 
         // value now decided and in replicated storage in leader
         {
@@ -436,7 +421,7 @@ mod tests {
             leader_node.release_tx(t2);
         }
         // wait for value to be decided
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(TIMEOUT)).await;
         // transaction should now be replicated
         {
             for s in nodes.keys() {
@@ -450,7 +435,7 @@ mod tests {
         let nodes = spawn_nodes(3);
 
         // wait for a leader to be elected
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(TIMEOUT)).await;
 
         // commit a transaction
         {
@@ -465,7 +450,7 @@ mod tests {
         }
 
         // wait for value to be replicated
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(TIMEOUT)).await;
         // kill leader
         let old_leader: NodeId;
         {
@@ -476,7 +461,7 @@ mod tests {
             (*leader_arc).1.abort();
         }
         // waiting for leader swaps
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(TIMEOUT)).await;
 
         // check that new leader state is correct
         {
@@ -495,7 +480,7 @@ mod tests {
         let nodes = spawn_nodes(3);
 
         // wait for a leader to be elected
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(TIMEOUT)).await;
 
         let original_leader: NodeId;
         // commit a transaction
@@ -513,7 +498,7 @@ mod tests {
             leader_commit_key_value(&nodes, &leader, "test".to_string(), "asd".to_string());
 
         }
-
+        // no leader change yet since it has only been 30ms (leader election starts at 50ms)
         tokio::time::sleep(Duration::from_millis(30)).await;
 
         {
@@ -529,7 +514,7 @@ mod tests {
         }
 
         // wait for new leader
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_millis(TIMEOUT)).await;
 
         // check that new leader state is correct
         {
@@ -549,7 +534,7 @@ mod tests {
         }
 
         // wait for replication
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(TIMEOUT)).await;
         {
             let leader = get_leader(&nodes, &select_not_given(&original_leader));
             println!("leader: {}", leader);
@@ -566,7 +551,7 @@ mod tests {
             }
         }
         // wait for stabilization
-        tokio::time::sleep(Duration::from_millis(1000)).await;
+        tokio::time::sleep(Duration::from_millis(TIMEOUT)).await;
 
         {
             for s in nodes.keys() {
@@ -598,7 +583,7 @@ mod tests {
     async fn chained_scenario() {
         let nodes = spawn_nodes(3);
         // wait for leader election
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(TIMEOUT)).await;
 
         let selected: NodeId;
         {
@@ -611,14 +596,14 @@ mod tests {
             disconnect_nodes(&nodes, &leader, &selected);
         }
 
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(TIMEOUT)).await;
 
 
         {
             let leader = get_leader(&nodes, &selected);
             leader_commit_key_value(&nodes, &leader, "still".to_string(), "make_progress".to_string());
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(TIMEOUT)).await;
 
         {
             let leader = get_leader(&nodes, &selected);
@@ -631,7 +616,7 @@ mod tests {
     async fn quorum_loss() {
         let nodes = spawn_nodes(5);
         // wait for leader election
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(TIMEOUT)).await;
         let selected: NodeId;
         {
             let leader = get_leader(&nodes, &1);
@@ -652,7 +637,7 @@ mod tests {
         }
 
         // wait for leader change
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(TIMEOUT)).await;
 
         // leader should now be the only quorum connected node
         {
@@ -664,7 +649,7 @@ mod tests {
         }
 
         // wait for replication (decided)
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(TIMEOUT)).await;
 
         {
             let val = get_key(&nodes, &selected, DurabilityLevel::Replicated, "should".to_string());
@@ -678,7 +663,7 @@ mod tests {
     async fn constrained_election() {
         let nodes = spawn_nodes(5);
         // wait for leader election
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(TIMEOUT)).await;
         let selected: NodeId;
         {
             let leader = get_leader(&nodes, &1);
@@ -688,7 +673,7 @@ mod tests {
         }
 
         // wait for replication (decided)
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(TIMEOUT)).await;
 
         // all nodes should have the first value
         {
@@ -717,7 +702,7 @@ mod tests {
             leader_commit_key_value(&nodes, &original_leader, "third".to_string(), "v3".to_string());
         }
         // wait for replication (decided)
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(TIMEOUT)).await;
 
         // all nodes except selected should have all the values decided
         {
@@ -760,7 +745,7 @@ mod tests {
             }
         }
         // wait for leader election
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(TIMEOUT)).await;
 
         {
             // selected node should be leader in all nodes except original leader which is disconnected
