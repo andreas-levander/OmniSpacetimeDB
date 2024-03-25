@@ -595,16 +595,18 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn quorum_loss() {
-        let nodes = spawn_nodes(5);
+    async fn chained_scenario() {
+        let nodes = spawn_nodes(3);
         // wait for leader election
         tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let selected: NodeId;
         {
             let leader = get_leader(&nodes, &1);
             println!("leader: {}", leader);
 
             // disconnect from all nodes except one
-            let selected = select_not_given(&leader);
+            selected = select_not_given(&leader);
 
             disconnect_nodes(&nodes, &leader, &selected);
         }
@@ -613,20 +615,20 @@ mod tests {
 
 
         {
-            let leader = get_leader(&nodes, &1);
+            let leader = get_leader(&nodes, &selected);
             leader_commit_key_value(&nodes, &leader, "still".to_string(), "make_progress".to_string());
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         {
-            let leader = get_leader(&nodes, &1);
+            let leader = get_leader(&nodes, &selected);
             let val = get_key(&nodes, &leader, DurabilityLevel::Replicated, "still".to_string());
             assert!(val.is_some());
             assert_eq!(val.unwrap(), "make_progress");
         }
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn chained_scenario() {
+    async fn quorum_loss() {
         let nodes = spawn_nodes(5);
         // wait for leader election
         tokio::time::sleep(Duration::from_millis(500)).await;
